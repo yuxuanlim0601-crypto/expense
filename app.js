@@ -66,6 +66,7 @@ const state = {
   month: monthKey(new Date()),
   scope: 'all',
   displayCur: store.get('displayCur', 'TWD'),
+  skipSticky: false,
 };
 const accById = id => state.accounts.find(a => a.id === id);
 const catById = id => state.categories.find(c => c.id === id);
@@ -160,7 +161,7 @@ async function reload() {
 function balanceOf(acc) {
   let b = Number(acc.opening_balance || 0);
   for (const t of state.txs) {
-    if (t.account_id === acc.id) b += t.type === 'income' ? Number(t.amount) : -Number(t.amount);
+    if (t.account_id === acc.id && !t.skip_balance) b += t.type === 'income' ? Number(t.amount) : -Number(t.amount);
     if (t.type === 'transfer' && t.to_account_id === acc.id) b += Number(t.to_amount);
   }
   return b;
@@ -243,7 +244,7 @@ function txRow(t) {
   }
   const note = t.note ? `<span class="row-note">${esc(t.note)}</span>` : '';
   return `<li class="row" data-id="${t.id}">
-    <div class="row-main"><span class="row-title">${title}</span>${note}<span class="row-sub">${sub}　${time}</span></div>
+    <div class="row-main"><span class="row-title">${title}</span>${note}<span class="row-sub">${sub}　${time}${t.skip_balance ? '　不扣余额' : ''}</span></div>
     <div class="row-amt ${cls}">${amt}</div>
   </li>`;
 }
@@ -464,6 +465,8 @@ function openTxForm(tx, preset = {}) {
       <label><span id="toAmtLabel">到账金额</span><input id="f_toamt" inputmode="decimal" autocomplete="off" value="${tx?.to_amount ?? ''}"></label>
       ${tx ? '' : '<label>手续费（选填，会另外记成一笔支出）<input id="f_fee" inputmode="decimal" placeholder="0" autocomplete="off"></label>'}
     </div>
+    <div id="skipWrap"><label class="check"><input type="checkbox" id="f_skip" ${(tx ? tx.skip_balance : state.skipSticky) ? 'checked' : ''}>补记：不扣账户余额</label>
+      <p class="hint">账户余额已经是扣过这笔之后的数字时勾选，例如补记前几天的花费。统计照样会算。</p></div>
     <label>时间<input id="f_when" type="datetime-local" value="${toLocalInput(when)}"></label>
     <label>备注<input id="f_note" autocomplete="off" value="${esc(tx?.note || '')}"></label>
     <div class="actions">
@@ -533,6 +536,7 @@ function openTxForm(tx, preset = {}) {
     fillAccounts();
     $('#catWrap').classList.toggle('hidden', isX);
     $('#xferWrap').classList.toggle('hidden', !isX);
+    $('#skipWrap').classList.toggle('hidden', isX);
     if ($('#splitWrap')) {
       $('#splitWrap').classList.toggle('hidden', type !== 'expense');
       $('#splitBox').classList.toggle('hidden', !splitOn());
@@ -581,6 +585,7 @@ function openTxForm(tx, preset = {}) {
     } else {
       row.category_id = $('#f_cat').value || null;
     }
+    row.skip_balance = type !== 'transfer' && $('#f_skip').checked;
 
     const shares = [];
     if (splitOn()) {
@@ -625,7 +630,7 @@ function openTxForm(tx, preset = {}) {
         }
         return {
           type: 'transfer', account_id, amount: s.amt, to_account_id: s.friendId, to_amount: toAmt,
-          occurred_at, note: label ? `代垫：${label}` : '代垫', ...rates,
+          occurred_at, note: label ? `代垫：${label}` : '代垫', skip_balance: row.skip_balance, ...rates,
         };
       });
       const r = await sb.from('transactions').insert(rows);
@@ -643,6 +648,7 @@ function openTxForm(tx, preset = {}) {
     }
     if (!isFriend(acc)) store.set('lastAcc', account_id);
     if (type !== 'transfer') store.set('lastType', type);
+    if (!tx && type !== 'transfer') state.skipSticky = row.skip_balance; // keep it on while back-filling
     closeSheet();
     await reload();
     toast('已保存');
