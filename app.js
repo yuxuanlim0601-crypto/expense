@@ -69,6 +69,7 @@ const state = {
 };
 const accById = id => state.accounts.find(a => a.id === id);
 const catById = id => state.categories.find(c => c.id === id);
+const isFriend = a => a?.kind === 'friend';
 
 /* ---------- exchange rates ---------- */
 async function getRates(force = false) {
@@ -227,8 +228,9 @@ function txRow(t) {
   let title, sub, amt, cls = '';
   if (t.type === 'transfer') {
     const to = accById(t.to_account_id);
-    title = '转账';
-    sub = `${esc(acc?.name)} 到 ${esc(to?.name)}`;
+    if (to && isFriend(to)) { title = `代垫给 ${esc(to.name)}`; sub = esc(acc?.name); }
+    else if (acc && isFriend(acc)) { title = `${esc(acc.name)} 还款`; sub = `存进 ${esc(to?.name)}`; }
+    else { title = '转账'; sub = `${esc(acc?.name)} 到 ${esc(to?.name)}`; }
     cls = 'move';
     amt = `${fmt(t.amount)} ${curTag(cur)}`;
     if (to && to.currency !== cur) amt += `<small>到账 ${fmt(t.to_amount)} ${esc(to.currency)}</small>`;
@@ -270,7 +272,7 @@ function renderStats() {
   }
   const maxT = Math.max(1, ...trend.map(x => x[1]));
 
-  const scopeOpts = `<option value="all">全部账户</option>` + state.accounts.map(a =>
+  const scopeOpts = `<option value="all">全部账户</option>` + state.accounts.filter(a => !isFriend(a)).map(a =>
     `<option value="${a.id}" ${a.id === state.scope ? 'selected' : ''}>${esc(a.name)}（${esc(a.currency)}）</option>`).join('');
   const curSeg = scopeAcc ? '' : `<div class="seg small" id="curSeg">${DISPLAY_CURS.map(c =>
     `<button data-cur="${c}" class="${c === cur ? 'on' : ''}">${c}</button>`).join('')}</div>`;
@@ -313,24 +315,35 @@ function setDisplayCur(c) {
 function renderAccounts() {
   const main = $('#main');
   const cur = state.displayCur;
-  const active = state.accounts.filter(a => !a.archived);
+  const active = state.accounts.filter(a => !a.archived && !isFriend(a));
+  const friends = state.accounts.filter(a => !a.archived && isFriend(a))
+    .sort((a, b) => balanceOf(b) - balanceOf(a));
   const archived = state.accounts.filter(a => a.archived);
   const total = active.reduce((s, a) => s + convert(balanceOf(a), a.currency, cur, null), 0);
-  const row = a => `<li class="row" data-id="${a.id}">
-      <div class="row-main"><span class="row-title">${esc(a.name)}</span><span class="row-sub">${a.archived ? '已封存' : ''}</span></div>
-      <div class="row-amt">${fmt(balanceOf(a))} ${curTag(a.currency)}</div>
+  const owed = friends.reduce((s, a) => s + Math.max(0, convert(balanceOf(a), a.currency, cur, null)), 0);
+  const row = a => {
+    const b = balanceOf(a);
+    const sub = isFriend(a) ? (b > 0 ? '还欠你' : b < 0 ? '你欠他' : '已还清') : (a.archived ? '已封存' : '');
+    return `<li class="row" data-id="${a.id}">
+      <div class="row-main"><span class="row-title">${esc(a.name)}</span><span class="row-sub">${sub}</span></div>
+      <div class="row-amt ${isFriend(a) && b > 0 ? 'in' : ''}">${fmt(isFriend(a) ? Math.abs(b) : b)} ${curTag(a.currency)}</div>
     </li>`;
+  };
   main.innerHTML = `
     <div class="figure">
       <div class="figure-label">总余额（按目前汇率换算）</div>
       <div class="figure-main"><span class="figure-num">${fmt(Math.round(total))}</span>${curTag(cur)}</div>
+      ${owed > 0 ? `<div class="figure-sub"><span>朋友还欠你 <b>${fmt(Math.round(owed))}</b>（不算在总余额里）</span></div>` : ''}
     </div>
     ${active.length ? `<ul class="rows">${active.map(row).join('')}</ul>` : '<p class="empty">还没有账户</p>'}
-    ${archived.length ? `<h3 class="section-title">已封存</h3><ul class="rows">${archived.map(row).join('')}</ul>` : ''}
-    <p class="hint" style="margin:12px 4px">余额 = 初始余额 + 收入 − 支出 ± 转账。点账户可以设定初始余额。</p>
-    <button class="btn ghost wide" id="addAcc">新增账户</button>`;
+    <button class="btn ghost wide" id="addAcc" style="margin-top:10px">新增账户</button>
+    <h3 class="section-title">朋友</h3>
+    ${friends.length ? `<ul class="rows">${friends.map(row).join('')}</ul>` : '<p class="hint" style="margin:0 4px">记支出时勾「有帮朋友代垫」，或在这里新增朋友。</p>'}
+    <button class="btn ghost wide" id="addFriend" style="margin-top:10px">新增朋友</button>
+    ${archived.length ? `<h3 class="section-title">已封存</h3><ul class="rows">${archived.map(row).join('')}</ul>` : ''}`;
   $$('.row', main).forEach(li => li.onclick = () => openAccountForm(accById(li.dataset.id)));
-  $('#addAcc').onclick = () => openAccountForm(null);
+  $('#addAcc').onclick = () => openAccountForm(null, 'normal');
+  $('#addFriend').onclick = () => openAccountForm(null, 'friend');
 }
 
 function renderSettings() {
@@ -415,25 +428,39 @@ function closeSheet() {
 }
 
 /* ---------- transaction form ---------- */
-function openTxForm(tx) {
-  const usable = state.accounts.filter(a => !a.archived || (tx && (a.id === tx.account_id || a.id === tx.to_account_id)));
-  if (!usable.length) { toast('先到「账户」新增一个账户'); state.view = 'accounts'; render(); return; }
+function openTxForm(tx, preset = {}) {
+  const keep = a => !a.archived || a.id === preset.account_id || (tx && (a.id === tx.account_id || a.id === tx.to_account_id));
+  const all = state.accounts.filter(keep);
+  const normal = all.filter(a => !isFriend(a));
+  if (!normal.length) { toast('先到「账户」新增一个账户'); state.view = 'accounts'; render(); return; }
 
-  let type = tx?.type || store.get('lastType', 'expense');
+  let type = tx?.type || preset.type || store.get('lastType', 'expense');
   const lastAcc = store.get('lastAcc');
-  const defAcc = tx?.account_id || usable.find(a => a.id === lastAcc)?.id || usable[0].id;
-  const defTo = tx?.to_account_id || usable.find(a => a.id !== defAcc)?.id || defAcc;
-  const accOpts = sel => usable.map(a => `<option value="${a.id}" ${a.id === sel ? 'selected' : ''}>${esc(a.name)}（${esc(a.currency)}）</option>`).join('');
+  const lastNormal = normal.find(a => a.id === lastAcc)?.id || normal[0].id;
+  let accSel = tx?.account_id || preset.account_id || lastNormal;
+  let toSel = tx?.to_account_id || preset.to_account_id
+    || (accSel !== lastNormal ? lastNormal : all.find(a => a.id !== accSel)?.id) || accSel;
   const when = tx ? new Date(tx.occurred_at) : new Date();
+  const canSplit = !tx || tx.type === 'expense';
+  const splits = [];
+  const amountVal = tx ? tx.amount : (preset.amount ?? '');
 
   openSheet(`
     <h2>${tx ? '编辑记录' : '记一笔'}</h2>
     <div class="seg" id="typeSeg">${['expense', 'income', 'transfer'].map(k => `<button data-type="${k}">${TYPE_LABEL[k]}</button>`).join('')}</div>
-    <label><span id="amtLabel">金额</span><input id="f_amt" class="amount-input" inputmode="decimal" placeholder="0" autocomplete="off" value="${tx ? tx.amount : ''}"></label>
-    <label><span id="accLabel">账户</span><select id="f_acc">${accOpts(defAcc)}</select></label>
+    <label><span id="amtLabel">金额</span><input id="f_amt" class="amount-input" inputmode="decimal" placeholder="0" autocomplete="off" value="${esc(amountVal)}"></label>
+    <label><span id="accLabel">账户</span><select id="f_acc"></select></label>
     <div id="catWrap"><label>分类<select id="f_cat"></select></label></div>
+    ${canSplit ? `<div id="splitWrap">
+      <label class="check"><input type="checkbox" id="f_split">有帮朋友代垫</label>
+      <div id="splitBox" class="hidden">
+        <div id="splitRows"></div>
+        <button class="btn ghost wide" id="addSplit" style="margin-top:8px">加一位朋友</button>
+        <p class="hint" id="myShare"></p>
+      </div>
+    </div>` : ''}
     <div id="xferWrap">
-      <label>转入账户<select id="f_to">${accOpts(defTo)}</select></label>
+      <label>转入账户<select id="f_to"></select></label>
       <label><span id="toAmtLabel">到账金额</span><input id="f_toamt" inputmode="decimal" autocomplete="off" value="${tx?.to_amount ?? ''}"></label>
       ${tx ? '' : '<label>手续费（选填，会另外记成一笔支出）<input id="f_fee" inputmode="decimal" placeholder="0" autocomplete="off"></label>'}
     </div>
@@ -445,81 +472,176 @@ function openTxForm(tx) {
     </div>`);
 
   const curOf = id => accById(id)?.currency || '';
+  const splitOn = () => canSplit && type === 'expense' && !!$('#f_split')?.checked;
+  const opts = (list, sel) => list.map(a => `<option value="${a.id}" ${a.id === sel ? 'selected' : ''}>${esc(a.name)}（${esc(a.currency)}）</option>`).join('');
+
+  const fillAccounts = () => {
+    const list = type === 'transfer' ? all : normal;
+    if (!list.some(a => a.id === accSel)) accSel = list[0].id;
+    $('#f_acc').innerHTML = opts(list, accSel);
+    if (!all.some(a => a.id === toSel)) toSel = all[0].id;
+    $('#f_to').innerHTML = opts(all, toSel);
+  };
   const autoToAmt = () => {
     if (type !== 'transfer') return;
-    const same = curOf($('#f_acc').value) === curOf($('#f_to').value);
+    const same = curOf(accSel) === curOf(toSel);
     $('#f_toamt').readOnly = same;
     if (same) $('#f_toamt').value = $('#f_amt').value;
+  };
+  const updateShare = () => {
+    if (!splitOn()) return;
+    const total = parseAmount($('#f_amt').value) || 0;
+    const owed = splits.reduce((s, x) => s + (parseAmount(x.amount) || 0), 0);
+    const mine = Math.round((total - owed) * 100) / 100;
+    $('#myShare').textContent = mine < 0
+      ? '朋友的部分加起来超过总额了'
+      : `你自己的部分：${fmt(mine)} ${curOf(accSel)}，只有这部分算进支出`;
+  };
+  const renderSplits = () => {
+    const friends = state.accounts.filter(a => isFriend(a) && !a.archived);
+    $('#splitRows').innerHTML = splits.map((s, i) => `
+      <div class="split-row">
+        <select data-i="${i}" data-k="friend" aria-label="朋友">
+          <option value="">选朋友</option>
+          ${friends.map(f => `<option value="${f.id}" ${f.id === s.friendId ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}
+          <option value="__new">＋ 新朋友</option>
+        </select>
+        <input data-i="${i}" data-k="amount" inputmode="decimal" placeholder="他的部分" autocomplete="off" value="${esc(s.amount)}">
+        <button class="icon-btn" data-i="${i}" data-k="del" aria-label="移除">×</button>
+      </div>`).join('');
+    $$('#splitRows [data-k=friend]').forEach(el => el.onchange = async () => {
+      const i = +el.dataset.i;
+      if (el.value !== '__new') { splits[i].friendId = el.value; return; }
+      const name = (prompt('朋友的名字') || '').trim();
+      if (!name) { el.value = splits[i].friendId || ''; return; }
+      const { data, error } = await sb.from('accounts')
+        .insert({ name, currency: curOf(accSel), kind: 'friend' }).select().single();
+      if (error) { toast(error.message); el.value = splits[i].friendId || ''; return; }
+      state.accounts.push(data);
+      all.push(data);
+      splits[i].friendId = data.id;
+      renderSplits();
+      fillAccounts();
+    });
+    $$('#splitRows [data-k=amount]').forEach(el => el.oninput = () => { splits[+el.dataset.i].amount = el.value; updateShare(); });
+    $$('#splitRows [data-k=del]').forEach(el => el.onclick = () => { splits.splice(+el.dataset.i, 1); renderSplits(); });
+    updateShare();
   };
   const sync = () => {
     $$('#typeSeg button').forEach(b => b.classList.toggle('on', b.dataset.type === type));
     const isX = type === 'transfer';
+    fillAccounts();
     $('#catWrap').classList.toggle('hidden', isX);
     $('#xferWrap').classList.toggle('hidden', !isX);
-    $('#accLabel').textContent = isX ? '转出账户' : '账户';
-    $('#amtLabel').textContent = `${isX ? '转出金额' : '金额'}（${curOf($('#f_acc').value)}）`;
-    $('#toAmtLabel').textContent = `到账金额（${curOf($('#f_to').value)}）`;
+    if ($('#splitWrap')) {
+      $('#splitWrap').classList.toggle('hidden', type !== 'expense');
+      $('#splitBox').classList.toggle('hidden', !splitOn());
+    }
+    $('#accLabel').textContent = isX ? '转出账户' : splitOn() ? '用哪个账户付' : '账户';
+    $('#amtLabel').textContent = `${isX ? '转出金额' : splitOn() ? '总共付了' : '金额'}（${curOf(accSel)}）`;
+    $('#toAmtLabel').textContent = `到账金额（${curOf(toSel)}）`;
     const kind = type === 'income' ? 'income' : 'expense';
     const sel = $('#f_cat');
     const prev = sel.value || tx?.category_id || '';
     sel.innerHTML = '<option value="">未分类</option>' + state.categories.filter(c => c.kind === kind)
       .map(c => `<option value="${c.id}" ${c.id === prev ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
     autoToAmt();
+    updateShare();
   };
 
   $$('#typeSeg button').forEach(b => b.onclick = () => { type = b.dataset.type; sync(); });
-  $('#f_acc').onchange = sync;
-  $('#f_to').onchange = sync;
-  $('#f_amt').oninput = autoToAmt;
+  $('#f_acc').onchange = e => { accSel = e.target.value; sync(); };
+  $('#f_to').onchange = e => { toSel = e.target.value; sync(); };
+  $('#f_amt').oninput = () => { autoToAmt(); updateShare(); };
+  if ($('#f_split')) $('#f_split').onchange = () => {
+    if ($('#f_split').checked && !splits.length) { splits.push({ friendId: '', amount: '' }); renderSplits(); }
+    sync();
+  };
+  if ($('#addSplit')) $('#addSplit').onclick = () => { splits.push({ friendId: '', amount: '' }); renderSplits(); };
   if ($('#f_cancel')) $('#f_cancel').onclick = closeSheet;
   sync();
-  if (!tx) $('#f_amt').focus();
+  if (!tx && preset.amount == null) $('#f_amt').focus();
 
   $('#f_save').onclick = async () => {
     const amount = parseAmount($('#f_amt').value);
     if (amount == null) return toast('请输入大于 0 的金额');
     const whenVal = $('#f_when').value;
     if (!whenVal) return toast('请选择时间');
-    const account_id = $('#f_acc').value;
+    const account_id = accSel;
     const acc = accById(account_id);
-    const row = {
-      type, account_id, amount,
-      occurred_at: new Date(whenVal).toISOString(),
-      note: $('#f_note').value.trim() || null,
-      category_id: null, to_account_id: null, to_amount: null,
-    };
+    const occurred_at = new Date(whenVal).toISOString();
+    const note = $('#f_note').value.trim() || null;
+    const row = { type, account_id, amount, occurred_at, note, category_id: null, to_account_id: null, to_amount: null };
+
     if (type === 'transfer') {
-      row.to_account_id = $('#f_to').value;
+      row.to_account_id = toSel;
       if (row.to_account_id === account_id) return toast('转出和转入不能是同一个账户');
       row.to_amount = parseAmount($('#f_toamt').value);
       if (row.to_amount == null) return toast('请输入到账金额');
     } else {
       row.category_id = $('#f_cat').value || null;
     }
-    const sameCurAsBefore = tx && curOf(tx.account_id) === acc.currency && tx.rate_twd != null;
-    if (!sameCurAsBefore) {
-      state.rates = state.rates || await getRates();
-      Object.assign(row, ratesFor(acc.currency, state.rates));
+
+    const shares = [];
+    if (splitOn()) {
+      for (const s of splits) {
+        const amt = parseAmount(s.amount);
+        if (!s.friendId && amt == null) continue;
+        if (!s.friendId) return toast('有一行还没选朋友');
+        if (amt == null) return toast('有一位朋友还没填金额');
+        shares.push({ friendId: s.friendId, amt });
+      }
+      if (!shares.length) return toast('请至少加一位朋友，或取消代垫');
+      const owed = shares.reduce((s, x) => s + x.amt, 0);
+      row.amount = Math.round((amount - owed) * 100) / 100;
+      if (row.amount < 0) return toast('朋友的部分加起来超过总额了');
     }
+
+    state.rates = state.rates || await getRates();
+    const rates = ratesFor(acc.currency, state.rates);
+    const sameCurAsBefore = tx && curOf(tx.account_id) === acc.currency && tx.rate_twd != null;
+    if (!sameCurAsBefore) Object.assign(row, rates);
 
     const btn = $('#f_save');
     btn.disabled = true;
-    const { error } = tx
-      ? await sb.from('transactions').update(row).eq('id', tx.id)
-      : await sb.from('transactions').insert(row);
-    if (error) { btn.disabled = false; return toast(error.message); }
+    const fail = msg => { btn.disabled = false; toast(msg); };
+
+    let res = { error: null };
+    if (row.amount > 0) {
+      res = tx ? await sb.from('transactions').update(row).eq('id', tx.id) : await sb.from('transactions').insert(row);
+    } else if (tx) {
+      res = await sb.from('transactions').delete().eq('id', tx.id); // whole bill was for friends
+    }
+    if (res.error) return fail(res.error.message);
+
+    if (shares.length) {
+      const label = note || catById(row.category_id)?.name || '';
+      const rows = shares.map(s => {
+        const fc = curOf(s.friendId);
+        let toAmt = s.amt;
+        if (fc !== acc.currency) {
+          const c = convert(s.amt, acc.currency, fc, null);
+          if (c > 0) toAmt = Math.round(c * 100) / 100;
+        }
+        return {
+          type: 'transfer', account_id, amount: s.amt, to_account_id: s.friendId, to_amount: toAmt,
+          occurred_at, note: label ? `代垫：${label}` : '代垫', ...rates,
+        };
+      });
+      const r = await sb.from('transactions').insert(rows);
+      if (r.error) return fail('代垫没有记成功：' + r.error.message);
+    }
 
     if (!tx && type === 'transfer') {
       const fee = parseAmount($('#f_fee').value);
       if (fee) {
         const r = await sb.from('transactions').insert({
-          type: 'expense', account_id, amount: fee, occurred_at: row.occurred_at,
-          note: '转账手续费', ...ratesFor(acc.currency, state.rates),
+          type: 'expense', account_id, amount: fee, occurred_at, note: '转账手续费', ...rates,
         });
         if (r.error) toast('手续费没有记成功：' + r.error.message);
       }
     }
-    store.set('lastAcc', account_id);
+    if (!isFriend(acc)) store.set('lastAcc', account_id);
     if (type !== 'transfer') store.set('lastType', type);
     closeSheet();
     await reload();
@@ -537,31 +659,41 @@ function openTxForm(tx) {
 }
 
 /* ---------- account form ---------- */
-function openAccountForm(acc) {
+function openAccountForm(acc, newKind = 'normal') {
+  const friend = (acc?.kind || newKind) === 'friend';
   const hasTx = acc && state.txs.some(t => t.account_id === acc.id || t.to_account_id === acc.id);
+  const bal = acc ? balanceOf(acc) : 0;
   openSheet(`
-    <h2>${acc ? '编辑账户' : '新增账户'}</h2>
-    <label>名称<input id="f_name" autocomplete="off" value="${esc(acc?.name || '')}" placeholder="例如：台湾银行"></label>
+    <h2>${acc ? (friend ? esc(acc.name) : '编辑账户') : (friend ? '新增朋友' : '新增账户')}</h2>
+    ${acc && friend ? `
+      <div class="figure">
+        <div class="figure-label">${bal > 0 ? '还欠你' : bal < 0 ? '你欠他' : '已还清'}</div>
+        <div class="figure-main"><span class="figure-num">${fmt(Math.abs(bal))}</span>${curTag(acc.currency)}</div>
+      </div>
+      ${bal > 0 ? '<button class="btn primary wide" id="f_repay">收到还款</button>' : ''}` : ''}
+    <label>${friend ? '名字' : '名称'}<input id="f_name" autocomplete="off" value="${esc(acc?.name || '')}" placeholder="${friend ? '例如：小明' : '例如：台湾银行'}"></label>
     <label>货币（3 个英文字母）<input id="f_cur" autocomplete="off" maxlength="3" value="${esc(acc?.currency || 'TWD')}" ${hasTx ? 'disabled' : ''}></label>
-    ${hasTx ? '<p class="hint">这个账户已有记录，不能再改货币。</p>' : ''}
-    <label>初始余额<input id="f_open" inputmode="decimal" autocomplete="off" value="${acc?.opening_balance ?? 0}"></label>
-    ${acc ? `<label class="check"><input type="checkbox" id="f_arch" ${acc.archived ? 'checked' : ''}>封存（记账时不再出现）</label>` : ''}
+    ${hasTx ? '<p class="hint">已经有记录了，不能再改货币。</p>' : ''}
+    <label>${friend ? '在用这个 app 之前就欠你的金额' : '初始余额'}<input id="f_open" inputmode="decimal" autocomplete="off" value="${acc?.opening_balance ?? 0}"></label>
+    ${acc ? `<label class="check"><input type="checkbox" id="f_arch" ${acc.archived ? 'checked' : ''}>封存（不再出现在选项里）</label>` : ''}
     <div class="actions">
       ${acc && !hasTx ? '<button class="btn danger" id="f_del">删除</button>' : '<button class="btn" id="f_cancel">取消</button>'}
       <button class="btn primary" id="f_save">保存</button>
     </div>`);
   if ($('#f_cancel')) $('#f_cancel').onclick = closeSheet;
+  if ($('#f_repay')) $('#f_repay').onclick = () => openTxForm(null, { type: 'transfer', account_id: acc.id, amount: bal });
 
   $('#f_save').onclick = async () => {
     const name = $('#f_name').value.trim();
     const currency = $('#f_cur').value.trim().toUpperCase();
     const opening = parseAmount($('#f_open').value || '0', true);
-    if (!name) return toast('请填账户名称');
+    if (!name) return toast(friend ? '请填名字' : '请填账户名称');
     if (!/^[A-Z]{3}$/.test(currency)) return toast('货币要是 3 个英文字母，例如 TWD');
-    if (opening == null) return toast('初始余额的格式不对');
+    if (opening == null) return toast('金额的格式不对');
     const row = { name, opening_balance: opening };
     if (!hasTx) row.currency = currency;
     if (acc) row.archived = $('#f_arch').checked;
+    else row.kind = friend ? 'friend' : 'normal';
     const { error } = acc
       ? await sb.from('accounts').update(row).eq('id', acc.id)
       : await sb.from('accounts').insert(row);
@@ -571,7 +703,7 @@ function openAccountForm(acc) {
     toast('已保存');
   };
   if ($('#f_del')) $('#f_del').onclick = async () => {
-    if (!confirm(`删除账户「${acc.name}」？`)) return;
+    if (!confirm(`删除「${acc.name}」？`)) return;
     const { error } = await sb.from('accounts').delete().eq('id', acc.id);
     if (error) return toast(error.message);
     closeSheet();

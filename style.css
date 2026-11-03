@@ -235,3 +235,8 @@ label.check input { width: 20px; height: 20px; appearance: auto; -webkit-appeara
   transition: opacity .2s, transform .2s; max-width: 85vw; text-align: center;
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* Split with friends */
+.split-row { display: grid; grid-template-columns: 1fr 110px 38px; gap: 8px; align-items: center; margin-top: 8px; }
+#splitWrap .check { margin-top: 14px; }
+.sheet-panel .figure { margin: 4px 0 12px; }
