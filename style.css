@@ -240,3 +240,10 @@ label.check input { width: 20px; height: 20px; appearance: auto; -webkit-appeara
 .split-row { display: grid; grid-template-columns: 1fr 110px 38px; gap: 8px; align-items: center; margin-top: 8px; }
 #splitWrap .check { margin-top: 14px; }
 .sheet-panel .figure { margin: 4px 0 12px; }
+
+/* Tappable category rows in stats */
+button.bar-row { display: block; width: 100%; text-align: left; padding: 6px 0; border-radius: 8px; }
+button.bar-row:active { background: var(--surface-2); }
+.bar-row .chev { color: var(--muted); margin-left: 6px; }
+.sheet-panel .rows { background: var(--surface-2); }
+.sheet-panel .row + .row { border-top-color: var(--surface); }

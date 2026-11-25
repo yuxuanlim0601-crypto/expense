@@ -1,5 +1,5 @@
 // network first, fall back to cache when offline
-const CACHE = 'expense-v3';
+const CACHE = 'expense-v4';
 const ASSETS = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icon-180.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {

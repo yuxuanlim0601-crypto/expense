@@ -290,8 +290,9 @@ function renderStats() {
       ${cats.length ? cats.map(([k, v]) => {
         const name = k === 'none' ? '未分类' : esc(catById(k)?.name || '已删除的分类');
         const pct = expTotal ? v / expTotal * 100 : 0;
-        return `<div class="bar-row"><div class="bar-label"><span>${name}</span><span>${fmt(Math.round(v))}　${pct.toFixed(0)}%</span></div><div class="bar"><i style="width:${pct}%"></i></div></div>`;
+        return `<button class="bar-row" data-cat="${k}"><div class="bar-label"><span>${name}<span class="chev">›</span></span><span>${fmt(Math.round(v))}　${pct.toFixed(0)}%</span></div><div class="bar"><i style="width:${pct}%"></i></div></button>`;
       }).join('') : '<p class="hint">这个月没有支出</p>'}
+      ${exp.length ? `<button class="btn ghost wide" id="allExp" style="margin-top:14px">查看全部支出明细（${exp.length} 笔）</button>` : ''}
     </section>
     <section class="panel"><h3>近 6 个月支出</h3>
       <div class="trend">${trend.map(([k, v]) => `
@@ -305,6 +306,36 @@ function renderStats() {
   bindMonthNav(main);
   $('#scopeSel').onchange = e => { state.scope = e.target.value; render(); };
   $$('#curSeg button').forEach(b => b.onclick = () => setDisplayCur(b.dataset.cur));
+
+  const where = scopeAcc ? scopeAcc.name : '全部账户';
+  const openDetail = (title, list) => {
+    const total = list.reduce((s, t) => s + val(t), 0);
+    const groups = new Map();
+    for (const t of list) {
+      const d = new Date(t.occurred_at);
+      const k = d.toDateString();
+      if (!groups.has(k)) groups.set(k, { d, items: [] });
+      groups.get(k).items.push(t);
+    }
+    openSheet(`
+      <h2>${esc(title)}</h2>
+      <p class="hint" style="margin:-8px 0 4px">${esc(where)}　${monthLabel(state.month)}　${list.length} 笔，共 ${fmt(Math.round(total))} ${esc(cur)}</p>
+      ${[...groups.values()].map(({ d, items }) =>
+        `<section class="day"><h3>${dayLabel(d)}</h3><ul class="rows">${items.map(txRow).join('')}</ul></section>`).join('')}
+      <div class="actions"><button class="btn primary" id="d_close">关闭</button></div>`);
+    $('#d_close').onclick = closeSheet;
+    $$('#sheetPanel .row').forEach(li => li.onclick = () => {
+      const t = state.txs.find(x => x.id === li.dataset.id);
+      closeSheet();
+      setTimeout(() => openTxForm(t), 260);
+    });
+  };
+  $$('.bar-row[data-cat]', main).forEach(b => b.onclick = () => {
+    const k = b.dataset.cat;
+    const name = k === 'none' ? '未分类' : (catById(k)?.name || '已删除的分类');
+    openDetail(name, exp.filter(t => (t.category_id || 'none') === k));
+  });
+  if ($('#allExp')) $('#allExp').onclick = () => openDetail('本月支出明细', exp);
 }
 
 function setDisplayCur(c) {
